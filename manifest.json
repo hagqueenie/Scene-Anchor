@@ -6,7 +6,7 @@
   "dependencies": [],
   "js": "index.js",
   "author": "ChatGPT (experimental user-specific prototype)",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "auto_update": false,
   "generate_interceptor": "sceneAnchorBeforeGeneration"
 }

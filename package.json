@@ -1,1 +1,6 @@
-{"private":true,"type":"module","name":"scene-anchor-companion","version":"0.2.0"}
+{
+  "private": true,
+  "type": "module",
+  "name": "scene-anchor-companion",
+  "version": "0.2.1"
+}

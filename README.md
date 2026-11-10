@@ -1,6 +1,12 @@
-# Scene Anchor — Swipe-safe SillyTavern extension (v0.2.0)
+# Scene Anchor — Swipe-safe SillyTavern extension (v0.2.1)
 
 **Experimental, user-specific companion to Smart Memory.** This version fixes a serious behavior in v0.1: it no longer treats each new swipe (a rejected alternative assistant reply) as part of story canon.
+
+## v0.2.1 initialization hotfix
+
+The v0.2 update accidentally called `fingerprintTranscript()` without importing it from `scene-core.js`. This caused initialization to stop as the UI was being created. Symptoms: the v0.2 heading appears, status stays at "Ready", and the anchor remains empty even if the refresh button is clicked. This hotfix adds the missing import and restores initialization.
+
+After updating the repository and running **Manage Extensions → Update**, reload SillyTavern, open the test chat and press **Refresh current scene**. If the extractor fails for another reason, the status should report the problem; send the exact message for diagnosis.
 
 ## v0.2 swipe fix
 

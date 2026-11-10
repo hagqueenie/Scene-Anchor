@@ -1,5 +1,5 @@
 /**
- * Scene Anchor v0.2.0: swipe-safe snapshots from the established story prefix.
+ * Scene Anchor v0.2.1: swipe-safe snapshots from the established story prefix.
  * Companions to Smart Memory. Does not modify chat messages or Smart Memory.
  */
 import {
@@ -9,7 +9,7 @@ import {
 import { getContext, extension_settings } from '../../../extensions.js';
 import {
     readableMessages, explicitSceneReset, parseAnchor, buildExtractionPrompt,
-    renderAnchor, acceptedMessagesForGeneration, fingerprintAcceptedMessages,
+    renderAnchor, acceptedMessagesForGeneration, fingerprintTranscript,
 } from './scene-core.js';
 
 const NAME = 'scene_anchor_companion';
@@ -170,13 +170,13 @@ async function buildUI() {
     panel.id = 'scene-anchor-companion-panel';
     panel.className = 'inline-drawer';
     panel.innerHTML = `
-      <div class="inline-drawer-toggle inline-drawer-header"><b>Scene Anchor (experimental) v0.2</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+      <div class="inline-drawer-toggle inline-drawer-header"><b>Scene Anchor (experimental) v0.2.1</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
       <div class="inline-drawer-content" style="padding:10px;">
         <label style="display:block; margin:8px 0;"><input type="checkbox" id="scene-anchor-enabled"> Enable live scene anchor</label>
         <label style="display:block; margin:8px 0;"><input type="checkbox" id="scene-anchor-auto"> Automatically refresh from accepted turns</label>
         <p class="notes">Swipe-safe: alternative AI replies are drafts, NOT new story turns. The anchor is reconstructed from the established chat before each generation and stays fixed across swipes. The chosen reply enters memory after your next message.</p>
         <button class="menu_button" id="scene-anchor-refresh" type="button">Refresh current scene</button>
-        <p class="notes" id="scene-anchor-status">Ready.</p>
+        <p class="notes" id="scene-anchor-status">Ready (v0.2.1). Press Refresh current scene to initialize.</p>
         <h4>Current anchor (accepted story before latest AI reply)</h4><pre id="scene-anchor-view" style="white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto;"></pre>
         <details><summary>Completed scene index (not injected)</summary><pre id="scene-anchor-history" style="white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto;"></pre></details>
         <p class="notes">Test on your duplicate chat. This extension does not alter or delete earlier swipe variants, and its v0.1 snapshots are automatically invalidated.</p>
@@ -242,4 +242,4 @@ if (event_types.MESSAGE_EDITED) eventSource.on(event_types.MESSAGE_EDITED, () =>
 if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, () => inject('idle'));
 eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onAiRendered);
 onChatChanged();
-console.info('[Scene Anchor] v0.2.0 swipe-safe companion loaded.');
+console.info('[Scene Anchor] v0.2.1 swipe-safe companion loaded.');
