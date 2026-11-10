@@ -1,12 +1,49 @@
 // Pure helpers for Scene Anchor; no SillyTavern globals required.
+// Select the messages that are actually established BEFORE a new model reply.
+// In SillyTavern a swipe/regenerate replaces the final assistant message; it
+// is NOT a new story turn. Never let that discarded alternative into extraction.
+export function acceptedMessagesForGeneration(messages, type = 'idle') {
+    const result = Array.isArray(messages) ? messages.slice() : [];
+    const mode = String(type || 'idle').toLowerCase();
+    if (mode === 'swipe' || mode === 'regenerate' || mode === 'idle') {
+        // Drop only the trailing assistant candidate. Earlier assistants are
+        // accepted because a subsequent user message followed them.
+        while (result.length && result[result.length - 1]?.is_system) result.pop();
+        if (result.length && !result[result.length - 1]?.is_user) result.pop();
+    }
+    return result;
+}
+
+// A compact cache key for the *accepted prefix* rather than the candidate
+// swipe. Excludes raw user text from the persisted chat metadata.
+export function fingerprintTranscript(text) {
+    const value = String(text);
+    let a = 2166136261 >>> 0;
+    let b = 0x9e3779b9 >>> 0;
+    for (let i = 0; i < value.length; i++) {
+        const n = value.charCodeAt(i);
+        a = Math.imul(a ^ n, 16777619) >>> 0;
+        b = (Math.imul(b ^ n, 2246822519) + 3266489917) >>> 0;
+    }
+    return `${value.length}:${a.toString(16)}:${b.toString(16)}`;
+}
+
 export const SCENE_FIELDS = ['location', 'time', 'participants', 'activity', 'environment', 'ongoing', 'just_finished'];
+
+export function fingerprintAcceptedMessages(messages, limit = 14) {
+    const included = (messages || []).filter(m => m && !m.is_system && typeof m.mes === 'string' && m.mes.trim()).slice(-limit);
+    return fingerprintTranscript(included.map(m => `${m.is_user ? 'USER' : 'ASSISTANT'}:${m.mes}`).join('\u241f'));
+}
 
 export function readableMessages(messages, limit = 14, perMessage = 1800) {
     return (messages || []).filter(m => m && !m.is_system && typeof m.mes === 'string' && m.mes.trim())
         .slice(-limit).map((m, i) => {
             const role = m.is_user ? "USER (Teya\'s writer)" : `ASSISTANT (${m.name || 'narrator'})`;
             const plain = m.mes.trim();
-            return `${i + 1}. ${role}: ${plain.length > perMessage ? plain.slice(0, perMessage) + ' [truncated]' : plain}`;
+            // Preserve the end of long messages: scene changes often happen THERE.
+            const excerpt = plain.length <= perMessage ? plain
+                : `${plain.slice(0, Math.min(350, Math.floor(perMessage / 3)))} [middle omitted] ${plain.slice(-(perMessage - Math.min(350, Math.floor(perMessage / 3))))}`;
+            return `${i + 1}. ${role}: ${excerpt}`;
         }).join('\n\n');
 }
 
@@ -47,6 +84,7 @@ export function renderAnchor(anchor, { override = '', reset = false } = {}) {
     let lines = [
         'LIVE SCENE ANCHOR — AUTOMATED, MAY BE IMPERFECT.',
         'Newest explicit chat messages override this snapshot and ALL older memory/scene/arc/state records.',
+        'A rejected AI swipe is an alternate draft, NOT an event in the story. Never use objects, actions or facts that only occurred in a discarded swipe.',
         'Historical scenes are NOT happening now. Do not carry forward television programs, hair dye, props, room contents, injuries, positions or activities after a scene transition.'
     ];
     if (!reset && anchor) {

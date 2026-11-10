@@ -1,42 +1,59 @@
-# Scene Anchor — Experimental SillyTavern Companion Extension
+# Scene Anchor — Swipe-safe SillyTavern extension (v0.2.0)
 
-**Prototype; not yet tested inside a live SillyTavern/Render session.** A small companion to Smart Memory, not a modification or replacement of it. Uses Smart Memory's existing connection-profile memory model (`generateMemoryExtract`), so it doesn't require a new API key or a second connection profile.
+**Experimental, user-specific companion to Smart Memory.** This version fixes a serious behavior in v0.1: it no longer treats each new swipe (a rejected alternative assistant reply) as part of story canon.
 
-## The problem it targets
+## v0.2 swipe fix
 
-A memory model stores a historical event (game show in the lounge; hair being bleached in the bathroom). A writer model mistakenly treats that old event as ongoing. This extension holds a single **replaceable** current-scene snapshot and injects it at depth 0 near the newest message. Past snapshots are archived per chat but **never** injected as if current.
+A swipe is a **replacement for the last assistant message**, not a new event in the story. v0.1 ran memory extraction after `CHARACTER_MESSAGE_RENDERED`, which could commit an alternate reply's contents to the *current scene* before the user decided whether to keep it. The next swipe then saw the discarded reply's objects and actions in the anchor.
 
-## Features
+v0.2 changes its lifecycle:
 
-- One current scene only: location, time, participants, present action, environment, ongoing business.
-- Refresh after each assistant reply using Smart Memory's separately configured LLM.
-- Immediate synchronous override when the next user message describes a time jump or obvious room change: stale snapshot is discarded **before** the next generation.
-- Past snapshots archived silently under the chat's metadata; no interruption, notes, or pop-ups required.
-- Avoids assigning psychological meanings, romantic motivations, private knowledge, or imagined props.
-- Shows current snapshot and a small completed-scene index in the Extensions menu.
-- Does not modify the original Smart Memory data, original character card, or actual chat messages.
+1. **Before** the next generation, use SillyTavern's asynchronous `generate_interceptor` to update the anchor from the *established* conversation.
+2. For `swipe` or `regenerate`, exclude the existing trailing assistant candidate from extraction.
+3. **Do not extract after an assistant reply**. All alternative swipes for a user turn reuse the same snapshot and source fingerprint.
+4. The user chooses which AI reply is accepted by continuing the conversation with a new user message. At the next generation, that chosen assistant message is part of the established history and is incorporated automatically.
+5. If the user uses **Continue** on a response, include that response in the continuity state (it is being extended, rather than replaced).
+6. Validate any async model result against the source fingerprint of the established story rather than against the generated swipe text.
+7. Ignore legacy v0.1 snapshot data until it has been re-extracted from an accepted prefix. The original chat, its swipe variants, and Smart Memory records remain unchanged.
 
-## Installation (manual; appropriate for a private Render-hosted SillyTavern)
+**Important:** The **Current anchor** preview intentionally describes the state *before the latest AI reply* while you are swiping. The next user message is the moment that establishes the chosen reply as canon. This is intentional.
 
-1. **Back up your chat and extension configuration. Use a duplicate branch first.**
-2. Copy the entire `Scene-Anchor` folder to the **same extension parent folder** where your `Smart-Memory` extension is installed. The folders must be siblings, named `Scene-Anchor` and `Smart-Memory` respectively. In ST these often correspond to `data/<user-handle>/extensions/` for private extensions, or `public/scripts/extensions/third-party/` for all users.
-3. Restart SillyTavern and look for **Scene Anchor (experimental)** under Extensions.
-4. Leave Smart Memory's Long-Term and Session memories on if useful, but **disable the inaccurate State Ledger, Short-Term Memory and Character & World Profiles** to prevent conflicting present-tense states. Consider disabling Scene History *injection* if it is ordered incorrectly.
-5. Confirm Smart Memory's **Memory LLM** still uses your saved Gemma 4 Instruct connection profile.
-6. Tap **Refresh current scene** once, inspect the resulting snapshot, and continue chatting. From then on it refreshes after each AI reply.
-7. Check **Prompt Itemization → Raw Prompt** for `LIVE SCENE ANCHOR` and confirm it appears with the correct scene.
+## Other features
 
-You **cannot** install this ZIP by pasting its sandbox link into SillyTavern's `Install Extension` dialog; that dialog requires a Git repository URL. Put the files on your Render-hosted SillyTavern server using your normal file access/deployment method, or upload the extension folder to your own Git repository and install by Git URL.
+- Keeps a short current location/time/participants/activity/environment note without inventing NPC knowledge or romantic motivations.
+- Clears temporary objects, programs, or other scene-specific conditions after explicit scene transitions.
+- Uses the extraction model configured in **Smart Memory → Memory LLM**. No additional API key or connection profile.
+- Tracks completed scene snapshots in chat metadata for reference; they are not injected as current events.
+- Contains no changes to chat messages, roleplay cards, or Smart Memory's own stored data.
 
-## Known limitations
+## Installing v0.2 when v0.1 is already installed from GitHub
 
-- This is a prototype that has only been statically checked outside SillyTavern. ST versions or install folder names can vary, and its dynamic import of `../Smart-Memory/generate.js` might need adjustment on your installation.
-- An LLM still makes mistakes. Read-only previews and explicit source priority reduce rather than eliminate errors.
-- A fresh model call follows each AI reply, increasing subscription usage/API traffic. If the automatic refresh finishes after you send your next message, the current-user override still takes priority.
-- The first reply after an unmarked scene change can still reflect an imperfect prior snapshot; explicit time/room transitions are handled conservatively. The model is instructed not to treat old details as active.
-- The *past scene index* is a lightweight chronology of snapshots after installation, not a retroactive scene map of the whole existing 200+ message chat. Smart Memory can continue handling historical memory.
-- On unsupported/unavailable Smart Memory extraction model, the extension logs an error; it does not alter your chat messages.
+1. Keep a backup/duplicate branch of the chat for testing.
+2. Download and extract this v0.2 ZIP. Inside `Scene-Anchor/` are five files: `index.js`, `scene-core.js`, `manifest.json`, `package.json`, and `README.md`.
+3. In **your existing GitHub Scene-Anchor repository**, replace the five files **at the repository root** with these newer versions. Commit the changes. Do **not** make another nested `Scene-Anchor` folder and do **not** upload the ZIP as the extension source.
+4. In SillyTavern go to **Extensions → Manage extensions → Scene Anchor → Update**, then reload the SillyTavern page. It is important to update the installed extension; GitHub changes do not instantly modify the already-installed copy.
+5. The extension settings heading should now read **Scene Anchor (experimental) v0.2**.
+6. Open your duplicate Bucky/Teya chat. Tap **Refresh current scene** once. Then generate a reply, swipe through a couple alternatives, and confirm the current anchor does not change between swipes.
+7. When you select one alternative and send your next message, the anchor will update from that chosen reply and your new message. No manual note updates needed.
+
+If the update button is missing or a Git update fails, do not delete your original chat. Check that the changed files were committed to the same repository and branch used by the installed extension.
+
+## Suggested Smart Memory settings for the test
+
+Keep Smart Memory available for the memory model and historical memory, but avoid injecting its inaccurate live/current-state records from **State Ledger**, **Short-Term Memory**, and **Character & World Profiles** while comparing continuity.
+
+## Remaining limitations
+
+- **Not live-tested inside your Render-hosted SillyTavern instance.** This is a source-level patch with JS syntax checks and simulated swipe tests, not a guarantee against every UI-specific timing race.
+- Uses a model extraction call before generation when a new accepted turn needs a fresh snapshot. This may add latency to the beginning of a response and use additional memory-model calls. Repeat swipes from the same user turn should reuse the cached snapshot.
+- The extractor is still an LLM and may misunderstand scene details; no extraction system guarantees perfect continuity.
+- Most recent explicit text in the chat always outranks the stored anchor.
+- Do not simultaneously inject another outdated "current moment" summary or State Ledger, because those systems can still reintroduce stale facts.
+
+## Technical test results
+
+Node.js syntax checks passed for `index.js` and `scene-core.js`. A small seven-case test suite verified stable state across alternate swipes, regeneration, selected swipe acceptance on the next user message, continuation behavior, and preservation of the end of longer messages during extraction. These tests do not substitute for testing in SillyTavern.
 
 ## Uninstall
 
-Disable Scene Anchor, restart and/or remove the `Scene-Anchor` folder. It stores only its own `scene_anchor_companion_v1` chat metadata; it does not delete Smart Memory records.
+Disable or remove Scene Anchor through SillyTavern's extension manager. Its own metadata key is `scene_anchor_companion_v1` (preserved for compatibility) and does not replace or delete your original chat messages or Smart Memory database.

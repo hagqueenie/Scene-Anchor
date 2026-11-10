@@ -1,23 +1,23 @@
 /**
- * Scene Anchor – companion to Smart Memory for active-scene continuity.
- * Prototype v0.1.0. Runs in SillyTavern's browser extension environment.
- * It does NOT modify Smart Memory's stored memories or character cards.
+ * Scene Anchor v0.2.0: swipe-safe snapshots from the established story prefix.
+ * Companions to Smart Memory. Does not modify chat messages or Smart Memory.
  */
 import {
     eventSource, event_types, setExtensionPrompt, extension_prompt_types,
     extension_prompt_roles, saveSettingsDebounced,
 } from '../../../../script.js';
 import { getContext, extension_settings } from '../../../extensions.js';
-import { readableMessages, explicitSceneReset, parseAnchor, buildExtractionPrompt, renderAnchor } from './scene-core.js';
+import {
+    readableMessages, explicitSceneReset, parseAnchor, buildExtractionPrompt,
+    renderAnchor, acceptedMessagesForGeneration, fingerprintAcceptedMessages,
+} from './scene-core.js';
 
 const NAME = 'scene_anchor_companion';
-const META = 'scene_anchor_companion_v1';
+const META = 'scene_anchor_companion_v1'; // Keep chat data on upgrade.
 const SLOT = 'scene_anchor_companion_current';
 const DEFAULTS = { enabled: true, autoRefresh: true, depth: 0, messages: 14, maxInputPerMessage: 1500, attachUserOverride: false };
 let memoryExtractorPromise = null;
-let running = false;
-let pending = false;
-let lastRequestedKey = '';
+let running = null;
 let chatVersion = 0;
 
 function settings() {
@@ -30,39 +30,37 @@ function settings() {
 function ctx() { return getContext(); }
 function currentMeta() { return ctx().chatMetadata?.[META] || null; }
 function currentMessages() { return Array.isArray(ctx().chat) ? ctx().chat : []; }
-function lastUser() { return [...currentMessages()].reverse().find(m => m?.is_user && !m.is_system && typeof m.mes === 'string'); }
-function currentChatKey() {
-    const c = ctx();
-    return String(c.chatId ?? c.groupId ?? c.characterId ?? '') + '/' + currentMessages().length;
+function transcriptFor(messages, conf = settings()) {
+    return readableMessages(messages, conf.messages, conf.maxInputPerMessage);
 }
-function currentFingerprint() {
-    const msgs = currentMessages();
-    const tail = msgs[msgs.length - 1] || {};
-    return `${currentChatKey()}/${String(tail.mes || '').slice(-100)}`;
+function selectedContext(mode = 'idle') {
+    const messages = acceptedMessagesForGeneration(currentMessages(), mode);
+    const transcript = transcriptFor(messages);
+    return { messages, transcript, sourceKey: fingerprintTranscript(transcript) };
 }
-function inject() {
+function inject(mode = 'idle') {
     const conf = settings();
     if (!conf.enabled || !currentMessages().length) {
         setExtensionPrompt(SLOT, '', extension_prompt_types.NONE, 0);
         return;
     }
-    const stored = currentMeta();
-    const messages = currentMessages();
-    const latest = messages.at(-1);
+    const selection = selectedContext(mode);
+    const record = currentMeta();
+    // v0.1 could save a discarded swipe as the current scene. Do not trust
+    // legacy metadata (or an unmatched source) in this new, swipe-safe version.
+    const snapshot = record?.sourceKey === selection.sourceKey ? record.snapshot : null;
+    const latest = selection.messages.at(-1);
     const latestRaw = latest?.is_user ? String(latest.mes || '') : '';
-    const latestText = conf.attachUserOverride ? latestRaw : '';
-    // Important: a previous scene's snapshot MUST NOT survive an explicit time jump.
-    const reset = latest?.is_user && explicitSceneReset(latestRaw);
-    let snap = stored?.snapshot || null;
-    // A copied chat can inherit stale metadata. Avoid using an anchor from the future.
-    if (stored?.processedLength > messages.length || stored?.processedLength < messages.length - 20) snap = null;
-    const block = renderAnchor(snap, { override: latestText, reset: !!reset });
+    const reset = !!(latest?.is_user && explicitSceneReset(latestRaw) && !snapshot);
+    const block = renderAnchor(snapshot, {
+        reset,
+        override: conf.attachUserOverride ? latestRaw : '',
+    });
     setExtensionPrompt(SLOT, block, extension_prompt_types.IN_CHAT, conf.depth, false, extension_prompt_roles.SYSTEM);
     updateUI();
 }
 function extractor() {
-    // Reuse the SAME separate model selected under Smart Memory → Memory LLM.
-    // No NanoGPT token, API key, or connection profile is copied or exposed.
+    // Reuse Smart Memory's separately configured memory model.
     if (!memoryExtractorPromise) {
         memoryExtractorPromise = import('../Smart-Memory/generate.js')
             .then(mod => {
@@ -72,78 +70,97 @@ function extractor() {
     }
     return memoryExtractorPromise;
 }
-async function refresh(reason = 'automatic') {
+
+async function refresh(reason = 'manual', mode = 'idle') {
     const conf = settings();
     if (!conf.enabled || !currentMessages().length) return;
-    if (running) { pending = true; return; }
-    running = true;
-    const capturedMeta = ctx().chatMetadata;
-    const capturedVersion = chatVersion;
-    const beforeLen = currentMessages().length;
-    const beforeFingerprint = currentFingerprint();
-    const previousRecord = currentMeta();
-    const previous = previousRecord?.snapshot || null;
-    try {
-        updateStatus('Updating current scene…');
-        const transcript = readableMessages(currentMessages(), conf.messages, conf.maxInputPerMessage);
-        const prompt = buildExtractionPrompt(transcript, previous);
-        const generate = await extractor();
-        // ST connection profile selected in Smart Memory controls this generation.
-        const raw = await generate(prompt, { responseLength: 550 });
-        const result = parseAnchor(raw);
-        if (!result) throw Error('The memory model returned a non-JSON scene snapshot');
-        // Never write a result into a different chat or after additional messages arrived.
-        if (capturedMeta !== ctx().chatMetadata || capturedVersion !== chatVersion || beforeFingerprint !== currentFingerprint()) {
-            updateStatus('Scene changed while updating; discarded old result.');
-            return;
-        }
-        const history = [...(previousRecord?.history || [])];
-        const lastActualUser = [...currentMessages()].reverse().find(m => m?.is_user && !m.is_system);
-        const explicit = explicitSceneReset(lastActualUser?.mes || '');
-        if (previous && (result.scene_changed || explicit)) {
-            const old = { ...previous };
-            delete old.scene_changed;
-            const oldSig = JSON.stringify(old);
-            if (!history.length || JSON.stringify(history.at(-1)?.snapshot) !== oldSig) {
-                history.push({ atMessage: previousRecord?.processedLength || beforeLen, snapshot: old });
-            }
-        }
-        if (!ctx().chatMetadata) throw Error('Chat metadata is not available');
-        ctx().chatMetadata[META] = {
-            snapshot: result,
-            processedLength: beforeLen,
-            fingerprint: beforeFingerprint,
-            history: history.slice(-25),
-            timestamp: Date.now(),
-            reason,
-        };
-        if (typeof ctx().saveMetadata === 'function') await ctx().saveMetadata();
-        inject();
-        updateStatus('Current scene updated.');
-    } catch (error) {
-        console.error('[Scene Anchor] Update failed', error);
-        updateStatus(`Update failed: ${error.message}`);
-    } finally {
-        running = false;
-        if (pending) { pending = false; setTimeout(() => refresh('queued'), 300); }
+
+    // Never let two extractor calls overwrite one another. When a new user
+    // turn arrives during extraction, wait for the older call, then recalculate
+    // from the NEW accepted prefix before building the next prompt.
+    if (running) await running.catch(() => {});
+    if (!settings().enabled || !currentMessages().length) return;
+    const selection = selectedContext(mode);
+    if (!selection.transcript.trim()) { inject(mode); return; }
+    const existing = currentMeta();
+    if (existing?.sourceKey === selection.sourceKey && existing?.snapshot) {
+        inject(mode);
+        return;
     }
+
+    const task = (async () => {
+        const capturedMeta = ctx().chatMetadata;
+        const capturedVersion = chatVersion;
+        try {
+            updateStatus('Updating accepted story state…');
+            // A prior v0.1 snapshot may include a rejected swipe. Do not feed
+            // legacy snapshots back into extraction during migration.
+            const prior = existing?.sourceKey ? existing.snapshot : null;
+            const prompt = buildExtractionPrompt(selection.transcript, prior);
+            const generate = await extractor();
+            const raw = await generate(prompt, { responseLength: 550 });
+            const result = parseAnchor(raw);
+            if (!result) throw Error('The memory model returned a non-JSON scene snapshot');
+
+            // Revalidate against the accepted prefix, not the current last AI
+            // message. A new generated swipe does not change this key.
+            if (capturedMeta !== ctx().chatMetadata || capturedVersion !== chatVersion ||
+                selectedContext(mode).sourceKey !== selection.sourceKey) {
+                updateStatus('Story changed while extracting; ignored stale result.');
+                return;
+            }
+            const history = [...(existing?.history || [])];
+            const lastUser = [...selection.messages].reverse().find(m => m?.is_user && !m.is_system);
+            const explicit = explicitSceneReset(lastUser?.mes || '');
+            if (prior && (result.scene_changed || explicit) && existing.sourceKey !== selection.sourceKey) {
+                const old = { ...prior };
+                delete old.scene_changed;
+                if (!history.length || JSON.stringify(history.at(-1)?.snapshot) !== JSON.stringify(old)) {
+                    history.push({ atMessage: existing.processedLength || 0, snapshot: old });
+                }
+            }
+            if (!ctx().chatMetadata) throw Error('Chat metadata is not available');
+            ctx().chatMetadata[META] = {
+                snapshot: result,
+                sourceKey: selection.sourceKey,
+                processedLength: selection.messages.length,
+                history: history.slice(-25),
+                timestamp: Date.now(),
+                reason,
+            };
+            if (typeof ctx().saveMetadata === 'function') await ctx().saveMetadata();
+            inject(mode);
+            updateStatus('Accepted scene updated. Swipes will reuse this state.');
+        } catch (error) {
+            console.error('[Scene Anchor] Update failed', error);
+            updateStatus(`Update failed: ${error.message}`);
+            inject(mode); // Never fall back to a rejected swipe snapshot.
+        }
+    })();
+    running = task;
+    try { await task; } finally { if (running === task) running = null; }
 }
-function updateStatus(text) {
-    const el = document.querySelector('#scene-anchor-status');
-    if (el) el.textContent = text;
+function updateStatus(message) {
+    const node = document.querySelector('#scene-anchor-status');
+    if (node) node.textContent = message;
 }
 function updateUI() {
     const area = document.querySelector('#scene-anchor-view');
     const history = document.querySelector('#scene-anchor-history');
     if (area) {
         const rec = currentMeta();
-        const snap = rec?.snapshot;
-        area.textContent = snap ? Object.entries(snap).filter(([k, v]) => k !== 'scene_changed' && v)
-            .map(([k, v]) => `${k.replaceAll('_', ' ')}: ${v}`).join('\n') : 'No current snapshot yet. Use “Refresh scene” once, or let automatic tracking run.';
+        const view = selectedContext('idle');
+        const snap = rec?.sourceKey === view.sourceKey ? rec.snapshot : null;
+        area.textContent = snap
+            ? Object.entries(snap).filter(([k, v]) => k !== 'scene_changed' && v)
+                .map(([k, v]) => `${k.replaceAll('_', ' ')}: ${v}`).join('\n')
+            : 'No swipe-safe snapshot for this accepted story turn yet. Generate a reply or press Refresh current scene.';
     }
     if (history) {
-        const arr = currentMeta()?.history || [];
-        history.textContent = arr.length ? arr.map((e, i) => `${i + 1}. Ended near message #${e.atMessage}: ${e.snapshot?.location || 'unknown'} — ${e.snapshot?.activity || 'unknown'}`).join('\n') : 'No completed scenes recorded yet.';
+        const entries = currentMeta()?.history || [];
+        history.textContent = entries.length
+            ? entries.map((entry, i) => `${i + 1}. Ended near message #${entry.atMessage}: ${entry.snapshot?.location || 'unknown'} — ${entry.snapshot?.activity || 'unknown'}`).join('\n')
+            : 'No completed scenes recorded yet.';
     }
 }
 async function buildUI() {
@@ -153,69 +170,76 @@ async function buildUI() {
     panel.id = 'scene-anchor-companion-panel';
     panel.className = 'inline-drawer';
     panel.innerHTML = `
-      <div class="inline-drawer-toggle inline-drawer-header"><b>Scene Anchor (experimental)</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+      <div class="inline-drawer-toggle inline-drawer-header"><b>Scene Anchor (experimental) v0.2</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
       <div class="inline-drawer-content" style="padding:10px;">
         <label style="display:block; margin:8px 0;"><input type="checkbox" id="scene-anchor-enabled"> Enable live scene anchor</label>
-        <label style="display:block; margin:8px 0;"><input type="checkbox" id="scene-anchor-auto"> Automatically refresh after replies</label>
-        <p class="notes">Uses Smart Memory's configured Memory LLM. Writes one short replaceable scene note, not a running therapy or relationship summary. Automatically archives completed snapshots without injecting them.</p>
+        <label style="display:block; margin:8px 0;"><input type="checkbox" id="scene-anchor-auto"> Automatically refresh from accepted turns</label>
+        <p class="notes">Swipe-safe: alternative AI replies are drafts, NOT new story turns. The anchor is reconstructed from the established chat before each generation and stays fixed across swipes. The chosen reply enters memory after your next message.</p>
         <button class="menu_button" id="scene-anchor-refresh" type="button">Refresh current scene</button>
         <p class="notes" id="scene-anchor-status">Ready.</p>
-        <h4>Current scene (view only)</h4><pre id="scene-anchor-view" style="white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto;"></pre>
+        <h4>Current anchor (accepted story before latest AI reply)</h4><pre id="scene-anchor-view" style="white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto;"></pre>
         <details><summary>Completed scene index (not injected)</summary><pre id="scene-anchor-history" style="white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto;"></pre></details>
-        <p class="notes">Test on a copy of your chat. Disable Smart Memory's outdated State Ledger, Short-Term Summary, and Character/World Profiles injection to avoid competing current-state notes.</p>
+        <p class="notes">Test on your duplicate chat. This extension does not alter or delete earlier swipe variants, and its v0.1 snapshots are automatically invalidated.</p>
       </div>`;
     root.appendChild(panel);
     document.querySelector('#scene-anchor-enabled').checked = settings().enabled;
     document.querySelector('#scene-anchor-auto').checked = settings().autoRefresh;
     document.querySelector('#scene-anchor-enabled').addEventListener('change', e => {
-        settings().enabled = e.target.checked; saveSettingsDebounced(); inject();
+        settings().enabled = e.target.checked;
+        saveSettingsDebounced();
+        inject();
     });
     document.querySelector('#scene-anchor-auto').addEventListener('change', e => {
-        settings().autoRefresh = e.target.checked; saveSettingsDebounced();
+        settings().autoRefresh = e.target.checked;
+        saveSettingsDebounced();
     });
-    document.querySelector('#scene-anchor-refresh').addEventListener('click', () => refresh('manual'));
+    document.querySelector('#scene-anchor-refresh').addEventListener('click', () => refresh('manual', 'idle'));
     updateUI();
 }
 function onChatChanged() {
     chatVersion++;
-    lastRequestedKey = '';
-    inject();
-    // Initial snapshot of latest 14 messages when opening an already-long chat.
-    // Avoid needless regeneration when the stored snapshot already matches the chat.
-    if (settings().enabled && settings().autoRefresh && currentMessages().length > 0) {
-        const rec = currentMeta();
-        if (!rec || rec.fingerprint !== currentFingerprint()) {
-            setTimeout(() => refresh('chat-load'), 500);
-        }
+    inject('idle');
+    // When opening an existing chat, build a swipe-safe snapshot from the
+    // accepted prefix (ending at the previous user message).
+    if (settings().enabled && settings().autoRefresh && currentMessages().length) {
+        setTimeout(() => refresh('chat-load', 'idle'), 400);
     }
 }
 function onUserMessage() {
-    // Synchronous update is intentional: latest user scene shift can cancel a stale
-    // anchor *before* the main model sends its next response.
-    inject();
+    // Do not assume that the newly selected AI swipe has already been extracted;
+    // the upcoming async interceptor will include it as accepted history.
+    inject('normal');
 }
-function onAiRendered(_id, type) {
-    if (!settings().enabled || !settings().autoRefresh) return;
-    if (type === 'quiet' || type === 'impersonate' || type === 'continue') return;
-    const key = currentFingerprint();
-    if (key === lastRequestedKey) return;
-    lastRequestedKey = key;
-    setTimeout(() => refresh('reply'), 250);
+function onSwipe() {
+    // Existing anchor remains based on the prior accepted user turn; never
+    // extract or commit whichever alternative the interface currently displays.
+    inject('swipe');
+    updateStatus('Swipe draft: keeping the previous accepted scene.');
+}
+function onAiRendered() {
+    // v0.1 extracted here, incorrectly promoting every rejected swipe into
+    // canonical scene memory. In v0.2 the AI reply is NOT committed until
+    // followed by the user's next message (or explicitly continued).
+    inject('idle');
 }
 
 await buildUI();
-// Some ST versions mount their extension settings panel after extension JS runs.
 if (event_types.APP_READY) eventSource.on(event_types.APP_READY, () => { buildUI(); updateUI(); });
 setTimeout(() => buildUI(), 1200);
-// Generation interceptors are run just before a normal prompt is assembled; this
-// guarantees a new user's scene transition suppresses an old snapshot in time.
+
 globalThis.sceneAnchorBeforeGeneration = async (_chat, _contextSize, _abort, type) => {
     if (type === 'quiet' || type === 'impersonate') return;
-    inject();
+    const mode = String(type || 'normal').toLowerCase();
+    if (settings().autoRefresh) await refresh('before-generation', mode);
+    inject(mode); // Always inject the matching accepted prefix or nothing.
 };
+
 eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 if (event_types.CHAT_LOADED) eventSource.on(event_types.CHAT_LOADED, onChatChanged);
 eventSource.on(event_types.MESSAGE_SENT, onUserMessage);
+if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, onSwipe);
+if (event_types.MESSAGE_EDITED) eventSource.on(event_types.MESSAGE_EDITED, () => inject('idle'));
+if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, () => inject('idle'));
 eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onAiRendered);
 onChatChanged();
-console.info('[Scene Anchor] Companion extension loaded.');
+console.info('[Scene Anchor] v0.2.0 swipe-safe companion loaded.');
